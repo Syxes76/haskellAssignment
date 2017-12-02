@@ -1,25 +1,45 @@
 import Control.Concurrent (threadDelay)
 import System.IO
-import Control.Monad (when)
 import System.Exit
 import System.Random
 import Data.List
 import System.Console.ANSI
+import Control.DeepSeq
 
+
+-- Line of Sight
+lineOfSight = 4  
+
+-- Max water capacity      
+maxWaterLevel = 20
+
+-- Water units refilled when walking over a water tile
+waterRefill = 15
+        
+-- Random generator (with seed)
+randGen = mkStdGen 1337
+
+-- Tile generation parameters
+treasureProb = 33
+waterProb = 10
+portalProb = 5
+lavaProb = 15
+adjLavaProb = 10
+
+-- Depth-First-Search step limit (recommended value of 8-10)
 maxPathLength = 10
 
 -- These values control how the map is rendered
+-- For a terminal with a resolution of 80x24, recommended values are :
+-- renderWidth = 9
+-- renderHeight = 4
 -- The double of this value plus 1 represents the amount of tiles rendered horizontaly
 renderWidth = 9
 -- The double of this value plus 1 represents the amount of tiles rendered verticaly
-renderHeight = 8
-
--- For a terminal with a resolution of 75x37, recommended values are :
--- renderWidth = 9
--- renderHeight = 8
+renderHeight = 4
 
 -- Misc function for removing duplicates
--- from StackOverflow
+-- taken from StackOverflow
 rmdups :: (Ord a) => [a] -> [a]
 rmdups = map head . group . sort
 
@@ -29,7 +49,7 @@ rmdups = map head . group . sort
 data State = State { xPos :: Int, yPos :: Int, waterLevel :: Int}
     deriving Show
 
-
+-- Moves player one tile in the specified direction and reduces water by one unit
 movePlayerUp State { xPos = newXPos, yPos = newYPos, waterLevel = newWaterLevel } =
     if newYPos > 0
         then State { xPos = newXPos, yPos = newYPos - 1, waterLevel = newWaterLevel - 1 }
@@ -46,26 +66,38 @@ movePlayerLeft State { xPos = newXPos, yPos = newYPos, waterLevel = newWaterLeve
 movePlayerRight State { xPos = newXPos, yPos = newYPos, waterLevel = newWaterLevel } = 
     State { xPos = newXPos + 1, yPos = newYPos, waterLevel = newWaterLevel - 1 }
 
+-- Refills player's water by a constant amount of units
 refillWater State { xPos = newXPos, yPos = newYPos, waterLevel = newWaterLevel } =
-    State { xPos = newXPos, yPos = newYPos, waterLevel = 10 }
+    State { xPos = newXPos, yPos = newYPos, waterLevel = minimum([maxWaterLevel,newWaterLevel+(waterRefill)]) }
 
+-- Prints out the "status" section of the display with information such as water left, treasures found
+-- and distance to nearby points of interest
 renderState :: State -> Int -> [(Int,Int)] -> [Tile] -> IO ()
 renderState state score tilesLooted map = do
-    putStrLn    "=========================================================================="
-    putStrLn      ("  Water units left : " ++ (show (waterLevel state)) ++ "   Treasures found  : " ++ (show score))
-    let waterDist = getClosestTile (xPos state) (yPos state) 'w' tilesLooted map
-        portalDist = getClosestTile (xPos state) (yPos state) 'p' tilesLooted map
-        treasureDist = getClosestTile (xPos state) (yPos state) 'd' tilesLooted map
-    if waterDist == maxPathLength*2
-        then putStr "  Nearest water : 10+"
-        else putStr ("  Nearest water : " ++ (show waterDist))
-    if portalDist == maxPathLength*2
-        then putStr "   Nearest portal : 10+"
-        else putStr ("  Nearest portal : " ++ (show portalDist))
-    if treasureDist == maxPathLength*2
-        then putStrLn "   Nearest treasure : 10+"
-        else putStrLn ("  Nearest treasure : " ++ (show treasureDist))
-    putStrLn    "=========================================================================="
+    putStrLn    "==========================================================================="
+    putStrLn     ("  Water units left : " ++ (show (waterLevel state)) ++ "   Treasures found  : " ++ (show score))
+    if waterProb > 0
+        then do
+            let waterDist = getClosestTile (xPos state) (yPos state) 'w' tilesLooted map
+            if waterDist == maxPathLength*2
+                then putStr ("  Nearest water : " ++(show maxPathLength)++"+")
+                else putStr ("  Nearest water : " ++ (show waterDist))
+        else putStr ("  Nearest water : None")
+    if portalProb > 0
+        then do
+            let portalDist = getClosestTile (xPos state) (yPos state) 'p' tilesLooted map
+            if portalDist == maxPathLength*2
+                then putStr ("   Nearest portal : " ++(show maxPathLength)++"+")
+                else putStr ("  Nearest portal : " ++ (show portalDist))
+        else putStr ("  Nearest portal : None")
+    if treasureProb > 0
+        then do
+            let treasureDist = getClosestTile (xPos state) (yPos state) 'd' tilesLooted map
+            if treasureDist == maxPathLength*2
+                then putStrLn ("   Nearest treasure : " ++(show maxPathLength)++"+")
+                else putStrLn ("  Nearest treasure : " ++ (show treasureDist))
+        else putStrLn ("  Nearest treasure : None")
+    putStrLn    "==========================================================================="
 
 
 -- Map related functions
@@ -73,147 +105,139 @@ renderState state score tilesLooted map = do
 data Tile = Tile { tileType :: Char, hasTreasure :: Bool }
     deriving Show  
 
-data RandomProp = RandomProp { randGen :: StdGen, treasureProb :: Int, waterProb :: Int, portalProb :: Int, lavaProb :: Int, lavaProb' :: Int }
-    deriving Show  
-
-
-randomTile :: Int -> Int -> RandomProp -> Int -> Tile
-randomTile x y randomProp num = do
-    let randNum = (randomRs (1,100) (randGen randomProp) :: [Int]) !! num
-    if randNum <= (waterProb randomProp)
+-- Randomly generates a tile type
+randomTile :: Int -> Int -> Int -> Tile
+randomTile x y num = do
+    let randNum = (randomRs (1,100) (randGen) :: [Int]) !! num
+    if randNum `seq` (randNum <= waterProb)
         then Tile { tileType = 'w', hasTreasure = False }
-        else if randNum <= (waterProb randomProp) + (portalProb randomProp)
+        else if (waterProb + portalProb ) `seq` (randNum <= (waterProb + portalProb ))
             then Tile { tileType = 'p', hasTreasure = False }
-            else if randNum <= ((waterProb randomProp) + (portalProb randomProp) + (lavaProb randomProp))
+            else if (waterProb + portalProb + lavaProb) `seq` (randNum <= waterProb + portalProb + lavaProb)
                 then Tile { tileType = 'l', hasTreasure = False }
                 else do
-                    let randNum = (randomRs (1,100) (randGen randomProp) :: [Int]) !! (num+1)
-                    if randNum <= (treasureProb randomProp)
+                    let randNum = (num+1) `seq` (randomRs (1,100) (randGen) :: [Int]) !! (num+1)
+                    if randNum `seq` (randNum <= treasureProb)
                         then Tile { tileType = 'd', hasTreasure = True }
                         else Tile { tileType = 'd', hasTreasure = False }
 
-randomTile' :: Int -> Int -> RandomProp -> Int -> Tile
-randomTile' x y randomProp num = do
-    let randNum = (randomRs (1,100) (randGen randomProp) :: [Int]) !! num
-    if randNum <= (waterProb randomProp)
+-- Randomly generates a tile type (adjacent to a lava tile)
+randomTile' :: Int -> Int -> Int -> Tile
+randomTile' x y num = do
+    let randNum = (randomRs (1,100) (randGen) :: [Int]) !! num
+    if randNum `seq` (randNum <= waterProb)
         then Tile { tileType = 'w', hasTreasure = False }
-        else if randNum <= (waterProb randomProp) + (portalProb randomProp)
+        else if (waterProb + portalProb ) `seq` (randNum <= (waterProb + portalProb ))
             then Tile { tileType = 'p', hasTreasure = False }
-            else if randNum <= ((waterProb randomProp) + (portalProb randomProp) + (lavaProb' randomProp))
+            else if (waterProb + portalProb + adjLavaProb) `seq` (randNum <= waterProb + portalProb + adjLavaProb)
                 then Tile { tileType = 'l', hasTreasure = False }
                 else do
-                    let randNum = (randomRs (1,100) (randGen randomProp) :: [Int]) !! (num+1)
-                    if randNum <= (treasureProb randomProp)
+                    let randNum = (num+1) `seq` (randomRs (1,100) (randGen) :: [Int]) !! (num+1)
+                    if randNum `seq` (randNum <= treasureProb)
                         then Tile { tileType = 'd', hasTreasure = True }
                         else Tile { tileType = 'd', hasTreasure = False }
 
-generateTile :: Int -> Int -> RandomProp -> [Tile] -> Int -> Tile
-generateTile x y randomProp map num
+-- Randomly generates a complete tile
+generateTile :: Int -> Int -> [Tile] -> Int -> Tile
+generateTile x y map num
     | x > 0 && y > 0 = do
-        let adjYTile = getTile x (y-1) map
-            adjXTile = getTile (x-1) y map
-        if (tileType adjXTile) == 'l' || (tileType adjYTile) == 'l'
-            then randomTile' x y randomProp num
-            else randomTile x y randomProp num
+        let adjYTile = (y-1) `seq` getTile x (y-1) map
+            adjXTile = (x-1) `seq` getTile (x-1) y map
+        if adjXTile `seq` adjYTile `seq` ((tileType adjXTile) == 'l' || (tileType adjYTile) == 'l')
+            then randomTile' x y num
+            else randomTile x y num
     | x > 0 = do
-        let adjXTile = getTile (x-1) y map
-        if (tileType adjXTile) == 'l'
-            then randomTile' x y randomProp num
-            else randomTile x y randomProp num
+        let adjXTile = (x-1) `seq` getTile (x-1) y map
+        if adjXTile `seq` ((tileType adjXTile) == 'l')
+            then randomTile' x y num
+            else randomTile x y num
     | y > 0 = do
-        let adjYTile = getTile x (y-1) map
-        if (tileType adjYTile) == 'l'
-            then randomTile' x y randomProp num
-            else randomTile x y randomProp num
+        let adjYTile = (y-1) `seq` getTile x (y-1) map
+        if adjYTile `seq` ((tileType adjYTile) == 'l')
+            then randomTile' x y num
+            else randomTile x y num
     | otherwise = Tile { tileType = 'd', hasTreasure = False }
 
-generateMatrix :: RandomProp -> [Tile]
-generateMatrix randomProp = generateMatrix' 0 0 randomProp [] 1
+-- Generates an infinite map in the form of a matrix (it is however kept in memory as a list)
+-- Starter function 
+generateMatrix :: [Tile]
+generateMatrix  = generateMatrix' 0 0 [] 1
 
-
-generateMatrix' :: Int -> Int -> RandomProp -> [Tile] -> Int -> [Tile]
-generateMatrix' 0 0 randomProp map num = do
-    let currTile = generateTile 0 0 randomProp map num 
-    [currTile] ++ generateMatrix' 1 0 randomProp (map ++ [currTile]) (num+2)
-generateMatrix' x 0 randomProp map num = do
-    let currTile = generateTile x 0 randomProp map num 
-    [currTile] ++ generateMatrix' 0 x randomProp (map ++ [currTile]) (num+2)
-generateMatrix' 0 y randomProp map num = do
-    let currTile = generateTile 0 y randomProp map num 
-    [currTile] ++ generateMatrix' y 1 randomProp (map ++ [currTile]) (num+2)
-generateMatrix' x y randomProp map num 
+generateMatrix' :: Int -> Int -> [Tile] -> Int -> [Tile]
+generateMatrix' 0 0 map num = do
+    let currTile = generateTile 0 0 map num 
+    currTile `seq` ([currTile] ++ ((map ++ [currTile]) `seq` (num+2) `seq` (generateMatrix' 1 0 (map ++ [currTile]) (num+2))))
+generateMatrix' x 0 map num = do
+    let currTile = generateTile x 0 map num 
+    currTile `seq` ([currTile] ++ ((map ++ [currTile]) `seq` (num+2) `seq` (generateMatrix' 0 x (map ++ [currTile]) (num+2))))
+generateMatrix' 0 y map num = do
+    let currTile = generateTile 0 y map num 
+    currTile `seq` ([currTile] ++ ((map ++ [currTile]) `seq` (num+2) `seq` (generateMatrix' y 1 (map ++ [currTile]) (num+2))))
+generateMatrix' x y map num 
     | x > y = do
-        let currTile = generateTile x y randomProp map num 
-        [currTile] ++ generateMatrix' y x randomProp (map ++ [currTile]) (num+2)
+        let currTile = generateTile x y map num 
+        currTile `seq` ([currTile] ++ ((map ++ [currTile]) `seq` (num+2) `seq` (generateMatrix' y x (map ++ [currTile]) (num+2))))
     | x < y = do
-        let currTile = generateTile x y randomProp map num 
-        [currTile] ++ generateMatrix' y (x+1) randomProp (map ++ [currTile]) (num+2)
+        let currTile = generateTile x y map num 
+        currTile `seq` ([currTile] ++ ((map ++ [currTile]) `seq` (num+2) `seq` (x+1) `seq` (generateMatrix' y (x+1) (map ++ [currTile]) (num+2))))
     | x == y = do
-        let currTile = generateTile x y randomProp map num 
-        [currTile] ++ generateMatrix' (x+1) 0 randomProp (map ++ [currTile]) (num+2)
+        let currTile = generateTile x y map num 
+        currTile `seq` ([currTile] ++ ((map ++ [currTile]) `seq` (num+2) `seq` (x+1) `seq` (generateMatrix' (x+1) 0 (map ++ [currTile]) (num+2))))
 
-
+-- Translates 2-dimensional coordinates into proper index values for searching tiles within the list of generated tiles
 getTile :: Int -> Int -> [Tile] -> Tile
 getTile 0 0 map = map!!0
 getTile x 0 map = do
     if x > 0
-        then map!!(x*x)
+        then (x*x) `deepseq` map!!(x*x)
         else Tile { tileType = 'x', hasTreasure = False }
 getTile 0 y map = do
     if y > 0
-        then map!!((y*y)+1)
+        then ((y*y)+1) `deepseq` map!!((y*y)+1)
         else Tile { tileType = 'x', hasTreasure = False }
 getTile x y map
     | x < 0 || y < 0 = Tile { tileType = 'x', hasTreasure = False }
-    | x > y = map!!((x*x)+2*y)
-    | x < y = map!!((y*y)+1+2*x)
-    | x == y = map!!(((x+1)*(y+1))-1)
+    | x > y = ((x*x)+2*y) `deepseq` map!!((x*x)+2*y)
+    | x < y = ((y*y)+1+2*x) `deepseq` map!!((y*y)+1+2*x)
+    | x == y = (((x+1)*(y+1))-1) `deepseq` map!!(((x+1)*(y+1))-1)
 
+-- Creates a line of sight radius and returns a list of all 'visible' tiles
+-- Starter function
+detectTiles :: Int -> Int -> [(Int,Int)] -> [(Int,Int)]
+detectTiles x y tilesVisible = detectTiles' x y 0 0 tilesVisible
 
-tileHasTreasure :: Int -> Int -> [Tile] -> Bool
-tileHasTreasure x y map = do
-    let currTile = getTile x y map
-    if hasTreasure currTile
-        then True
-        else False
-
-
-detectTiles :: Int -> Int -> Int -> [(Int,Int)] -> [(Int,Int)]
-detectTiles lineOfSight x y tilesVisible = detectTiles' lineOfSight x y 0 0 tilesVisible
-
-
-detectTiles' :: Int -> Int -> Int -> Int -> Int -> [(Int,Int)] -> [(Int,Int)]
-detectTiles' lineOfSight x y nx ny tilesVisible
+detectTiles' :: Int -> Int -> Int -> Int -> [(Int,Int)] -> [(Int,Int)]
+detectTiles' x y nx ny tilesVisible
     | ny == (lineOfSight*2) = do
         if not (elem (x,(y+lineOfSight)) tilesVisible)
-            then [(x,(y+lineOfSight))]
+            then (y+lineOfSight) `seq` [(x,(y+lineOfSight))]
             else []
     | ny >= 0 && ny < lineOfSight = do
         if (nx <= ny)
-            then [((x+nx),(y-(lineOfSight-ny)))] ++ detectTiles' lineOfSight x y (nx+1) ny tilesVisible
-            else [] ++ detectTiles' lineOfSight x y (negate (ny+1)) (ny+1) tilesVisible
+            then ((x+nx) `seq` (y-(lineOfSight-ny)) `deepseq` [((x+nx),(y-(lineOfSight-ny)))]) ++ ((nx+1) `seq` detectTiles' x y (nx+1) ny tilesVisible)
+            else [] ++ ((ny+1) `seq` (negate (ny+1)) `seq` detectTiles' x y (negate (ny+1)) (ny+1) tilesVisible)
     | ny >= lineOfSight && ny < (lineOfSight*2) = do
         if (nx <= (lineOfSight-(mod ny lineOfSight)))
-            then [((x+nx),(y+(ny-lineOfSight)))] ++ detectTiles' lineOfSight x y (nx+1) ny tilesVisible
-            else [] ++ detectTiles' lineOfSight x y (negate (lineOfSight-(mod (ny+1) lineOfSight))) (ny+1) tilesVisible
+            then ((x+nx) `seq` (y+(ny-lineOfSight)) `deepseq` [((x+nx),(y+(ny-lineOfSight)))]) ++ ((nx+1) `deepseq` detectTiles' x y (nx+1) ny tilesVisible)
+            else [] ++ ((ny+1) `seq` (negate (lineOfSight-(mod (ny+1) lineOfSight))) `deepseq` detectTiles' x y (negate (lineOfSight-(mod (ny+1) lineOfSight))) (ny+1) tilesVisible)
 
+-- Prints out the map
+-- Starter function
+renderMap :: Int -> Int -> [(Int,Int)] -> [Tile] -> IO ()
+renderMap x y tilesVisible map = (negate (renderWidth*2)) `deepseq` (negate (renderHeight*2)) `deepseq` renderMap' x y (negate (renderWidth*2)) (negate (renderHeight*2)) tilesVisible map
 
-renderMap :: Int -> Int -> Int -> [(Int,Int)] -> [Tile] -> IO ()
-renderMap lineOfSight x y tilesVisible map = renderMap' lineOfSight x y (negate (renderWidth*2)) (negate (renderHeight*2)) tilesVisible map
-
-
-renderMap' :: Int -> Int -> Int -> Int -> Int -> [(Int,Int)] -> [Tile] -> IO ()
-renderMap' lineOfSight x y nx ny tilesVisible map
+renderMap' :: Int -> Int -> Int -> Int -> [(Int,Int)] -> [Tile] -> IO ()
+renderMap' x y nx ny tilesVisible map
     | nx == 0 && ny == 0 = do
         putStr "|P"
-        renderMap' lineOfSight x y (nx+1) ny tilesVisible map
+        (nx+1) `seq` renderMap' x y (nx+1) ny tilesVisible map
     | otherwise = do
         if nx < (renderWidth*2) 
             then do
-                if elem ((x+nx),(y+ny)) tilesVisible
+                if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
                     then do
-                        let currTile = getTile (x+nx) (y+ny) map
-                            currTileType = tileType currTile
+                        let currTile = (x+nx) `seq` (y+ny) `seq` getTile (x+nx) (y+ny) map
+                            currTileType = currTile `seq` tileType currTile
                         case currTileType of 
                             'd' ->  putStr "| "
                             'l' ->  putStr "|!"
@@ -221,12 +245,12 @@ renderMap' lineOfSight x y nx ny tilesVisible map
                             'w' ->  putStr "|~"
                             _   ->  putStr "|X"
                     else putStr "|?"
-                renderMap' lineOfSight x y (nx+1) ny tilesVisible map
+                renderMap' x y (nx+1) ny tilesVisible map
             else do
-                if elem ((x+nx),(y+ny)) tilesVisible
+                if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
                     then do
-                        let currTile = getTile (x+nx) (y+ny) map
-                            currTileType = tileType currTile
+                        let currTile = (x+nx) `seq` (y+ny) `seq` getTile (x+nx) (y+ny) map
+                            currTileType = currTile `seq` tileType currTile
                         case currTileType of 
                             'd' ->  putStrLn "| |"
                             'l' ->  putStrLn "|!|"
@@ -236,15 +260,16 @@ renderMap' lineOfSight x y nx ny tilesVisible map
                     else putStrLn "|?|"
                 if ny < (renderHeight*2)
                     then do
-                        renderMap' lineOfSight x y (negate (renderWidth*2)) (ny+1) tilesVisible map
+                        (negate (renderWidth*2)) `deepseq` (ny+1) `seq` renderMap' x y (negate (renderWidth*2)) (ny+1) tilesVisible map
                     else
                         return ()
 
-
+-- Searches for a specific tile type using Depth-First-Search and returns the length of the shortest path found
+-- Starter function
 getClosestTile :: Int -> Int -> Char -> [(Int,Int)] -> [Tile] -> Int
-getClosestTile sx sy targetTile tilesLooted map = getClosestTile' sx sy targetTile 0 tilesLooted [] map
+getClosestTile sx sy targetTile tilesLooted map = getClosestTile'' sx sy targetTile 0 tilesLooted [] map
 
-
+-- ... using lazy evaluation
 getClosestTile' :: Int -> Int -> Char -> Int -> [(Int,Int)] -> [(Int,Int)] -> [Tile] -> Int
 getClosestTile' sx sy targetTile steps tilesLooted pathTaken map
     | (sx < 0) || (sy < 0) || (steps > maxPathLength) || (elem (sx,sy) pathTaken) = (maxPathLength*2)
@@ -262,22 +287,41 @@ getClosestTile' sx sy targetTile steps tilesLooted pathTaken map
                         minimum (allPaths''')
                     else (maxPathLength*2)
 
+-- using strict evaluation
+getClosestTile'' :: Int -> Int -> Char -> Int -> [(Int,Int)] -> [(Int,Int)] -> [Tile] -> Int
+getClosestTile'' sx sy targetTile steps tilesLooted pathTaken map
+    | (sx < 0) || (sy < 0) || (steps > maxPathLength) || (elem (sx,sy) pathTaken) = (maxPathLength*2)
+    | otherwise = do
+        let currTile = map `seq` getTile sx sy map
+        if currTile `seq` ((targetTile == (tileType currTile) && (not (elem (sx,sy) tilesLooted))) && (((targetTile == 'd') && (hasTreasure currTile)) || (targetTile /= 'd')))
+            then steps
+            else do
+                if (tileType currTile) `seq` ((tileType currTile) /= 'l' && (tileType currTile) /= 'p')
+                    then do
+                        let allPaths =  ((sx+1) `seq` (steps+1) `seq` (pathTaken++[(sx,sy)]) `seq` [(getClosestTile'' (sx+1) sy targetTile (steps+1) tilesLooted (pathTaken++[(sx,sy)]) map)]) 
+                            allPaths' = allPaths `deepseq` (allPaths ++ ((sy+1) `seq` (steps+1) `seq` (pathTaken++[(sx,sy)]) `seq` [(getClosestTile'' sx (sy+1) targetTile (steps+1) tilesLooted (pathTaken++[(sx,sy)]) map)]))
+                            allPaths'' = allPaths' `deepseq` (allPaths' ++ ((sx-1) `seq` (steps+1) `seq` (pathTaken++[(sx,sy)]) `seq` [(getClosestTile'' (sx-1) sy targetTile (steps+1) tilesLooted (pathTaken++[(sx,sy)]) map)]) )
+                            allPaths''' = allPaths'' `deepseq` (allPaths'' ++ ((sy-1) `seq` (steps+1) `seq` (pathTaken++[(sx,sy)]) `seq` [(getClosestTile'' sx (sy-1) targetTile (steps+1) tilesLooted (pathTaken++[(sx,sy)]) map)]))
+                        allPaths''' `deepseq` minimum (allPaths''')
+                    else (maxPathLength*2)
+
+
 
 -- Main loop functions
-loop:: Int -> State -> [(Int,Int)] -> [(Int,Int)] -> [Tile] -> Int -> IO ()
-loop lineOfSight state tilesLooted tilesVisible map score = do
+loop:: State -> [(Int,Int)] -> [(Int,Int)] -> [Tile] -> Int -> IO ()
+loop state tilesLooted tilesVisible map score = do
     threadDelay 2000
     let currX = xPos state
         currY = yPos state
-        currTile = getTile currX currY map
-        currTileType = tileType currTile
+        currTile = currX `seq` currY `seq` getTile currX currY map
+        currTileType = currTile `seq` tileType currTile
     case currTileType of 
         'd' ->  do
-            if (elem (currX,currY) tilesLooted) || not (tileHasTreasure currX currY map)
+            if (elem (currX,currY) tilesLooted) || not (hasTreasure currTile)
                 then return()
                 else do
                     let tilesLooted' = tilesLooted ++ [(currX,currY)]
-                    loop lineOfSight state tilesLooted' tilesVisible map (score+1)
+                    tilesLooted' `deepseq` loop state tilesLooted' tilesVisible map (score+1)
         'l' ->  do
             print "YOU FELL IN LAVA ! GAME OVER !"
             exitWith ExitSuccess
@@ -291,16 +335,16 @@ loop lineOfSight state tilesLooted tilesVisible map score = do
                 else do
                     let tilesLooted' = tilesLooted ++ [(currX,currY)]
                         state' = refillWater state
-                    loop lineOfSight state' tilesLooted' tilesVisible map score
+                    state' `seq` tilesLooted' `deepseq` loop state' tilesLooted' tilesVisible map score
     if waterLevel state < 1
         then do
             print "YOU RAN OUT OF WATER ! GAME OVER !"
             exitWith ExitSuccess
         else do
             clearScreen 
-            let newTilesVisible = tilesVisible ++ (detectTiles lineOfSight currX currY tilesVisible)
-                tilesVisible' = rmdups newTilesVisible
-            renderMap lineOfSight currX currY tilesVisible' map
+            let newTilesVisible = tilesVisible ++ (detectTiles currX currY tilesVisible)
+                tilesVisible' = newTilesVisible `deepseq` rmdups newTilesVisible
+            tilesVisible' `deepseq` renderMap currX currY tilesVisible' map
             renderState state score tilesLooted map
             key <- getChar
             case key of
@@ -309,31 +353,34 @@ loop lineOfSight state tilesLooted tilesVisible map score = do
                     exitWith ExitSuccess
                 'z' -> do 
                     let state' = movePlayerUp state
-                    loop lineOfSight state' tilesLooted tilesVisible' map score
+                    state' `seq` loop state' tilesLooted tilesVisible' map score
                 's' -> do 
                     let state' = movePlayerDown state
-                    loop lineOfSight state' tilesLooted tilesVisible' map score
+                    state' `seq` loop state' tilesLooted tilesVisible' map score
                 'q' -> do 
                     let state' = movePlayerLeft state
-                    loop lineOfSight state' tilesLooted tilesVisible' map score
+                    state' `seq` loop state' tilesLooted tilesVisible' map score
                 'd' -> do 
                     let state' = movePlayerRight state
-                    loop lineOfSight state' tilesLooted tilesVisible' map score
+                    state' `seq` loop state' tilesLooted tilesVisible' map score
                 _   -> do
                     let state' = state
-                    loop lineOfSight state' tilesLooted tilesVisible' map score
+                    state' `seq` loop state' tilesLooted tilesVisible' map score
 
 
 main = do
-    if renderWidth < 0 || renderHeight < 0 
+    if lineOfSight < 0 || maxWaterLevel < 0 || waterRefill < 0 || treasureProb < 0 || waterProb < 0 || portalProb < 0 || lavaProb < 0 || adjLavaProb < 0 || maxPathLength < 0 || renderWidth <= 0 || renderHeight <= 0 
         then do
-            print "ERROR : renderWidth and renderHeight must be greater than 0"
+            print "ERROR : negative parameters detected ! please provide only positive values for each parameter ! (renderWidth and renderHeight must be greater than 0 as well)"
+            exitWith ExitSuccess
         else return ()
-    let initialState = State {xPos = 0, yPos = 0, waterLevel = 10 }
-        randGen' = mkStdGen 1337
-        randomProp = RandomProp { randGen = randGen', treasureProb = 40, waterProb = 30, portalProb = 10, lavaProb = 0, lavaProb' = 0 }
-        lineOfSight = 4
+    if (waterProb + portalProb + lavaProb > 100) || (waterProb + portalProb + adjLavaProb > 100)
+        then do
+            print "ERROR : spawning probabilities sum is greater than 100 !"
+            exitWith ExitSuccess
+        else return ()
+    let initialState = State {xPos = 0, yPos = 0, waterLevel = maxWaterLevel }
     hSetBuffering stdin NoBuffering
     hSetEcho stdin False
-    let initialMap = generateMatrix randomProp
-    loop lineOfSight initialState [] [] initialMap 0
+    let initialMap =  randGen `seq` generateMatrix 
+    initialState `seq` initialMap `seq` loop initialState [] [] initialMap 0

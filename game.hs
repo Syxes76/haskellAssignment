@@ -351,13 +351,13 @@ loop state tilesLooted tilesVisible map score = do
                 'k' -> do 
                     print "YOU KILLED YOURSELF ! GAME OVER !"
                     exitWith ExitSuccess
-                'z' -> do 
+                'w' -> do 
                     let state' = movePlayerUp state
                     state' `seq` loop state' tilesLooted tilesVisible' map score
                 's' -> do 
                     let state' = movePlayerDown state
                     state' `seq` loop state' tilesLooted tilesVisible' map score
-                'q' -> do 
+                'a' -> do 
                     let state' = movePlayerLeft state
                     state' `seq` loop state' tilesLooted tilesVisible' map score
                 'd' -> do 

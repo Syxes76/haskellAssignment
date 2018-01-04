@@ -5,6 +5,47 @@ import System.Random
 import Data.List
 import System.Console.ANSI
 import Control.DeepSeq
+import Graphics.Gloss
+import Graphics.Gloss.Interface.Pure.Game
+
+
+
+
+
+-- dis iz da hud
+
+( pictures [translate (-112.5) (263.5) $ color (greyN 0.75) $ rectangleSolid 695 54
+                                                                                , translate (-450) 243 $ scale 0.15 0.15 $ Text "Nearest water : 10"
+                                                                                , translate (-225) 243 $ scale 0.15 0.15 $ Text "Nearest portal : 10"
+                                                                                , translate (0) 243 $ scale 0.15 0.15 $ Text "Nearest treasure : 10"
+                                                                                , translate (-400) (270) $ scale 0.15 0.15 $ Text "Water units left : 15"
+                                                                                , translate (-70) (270) $ scale 0.15 0.15 $ Text "Treasures found  : 15"
+                                                                                , translate (-345) (250) $ rectangleWire 230 27
+                                                                                , translate (-120) (250) $ rectangleWire 220 27
+                                                                                , translate (112.5) (250) $ rectangleWire 245 27
+                                                                                , translate (-286.5) (277) $ rectangleWire 347 27
+                                                                                , translate (61) (277) $ rectangleWire 348 27
+                                                                                ] )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 -- Line of Sight
@@ -34,9 +75,15 @@ maxPathLength = 10
 -- renderWidth = 9
 -- renderHeight = 4
 -- The double of this value plus 1 represents the amount of tiles rendered horizontaly
-renderWidth = 9
+renderWidth = 4
 -- The double of this value plus 1 represents the amount of tiles rendered verticaly
 renderHeight = 4
+
+tileSizeInt :: Int
+tileSizeInt = 25
+
+tileSize :: Float
+tileSize = fromIntegral tileSizeInt
 
 -- Misc function for removing duplicates
 -- taken from StackOverflow
@@ -46,11 +93,17 @@ rmdups = map head . group . sort
 
 -- Player/State related functions
 
-data State = State { xPos :: Int, yPos :: Int, waterLevel :: Int}
+data State = State { xPos :: Int
+                    , yPos :: Int
+                    , waterLevel :: Int
+                    , tilesLooted :: [(Int,Int)]
+                    , tilesVisible :: [(Int,Int)]
+                    , map :: [Tile]
+                    , score :: Int}
     deriving Show
 
 -- Moves player one tile in the specified direction and reduces water by one unit
-movePlayerUp State { xPos = newXPos, yPos = newYPos, waterLevel = newWaterLevel } =
+movePlayerUp State { xPos = newXPos, yPos = newYPos, waterLevel = newWaterLevel} =
     if newYPos > 0
         then State { xPos = newXPos, yPos = newYPos - 1, waterLevel = newWaterLevel - 1 }
         else State { xPos = newXPos, yPos = newYPos, waterLevel = newWaterLevel }
@@ -223,46 +276,26 @@ detectTiles' x y nx ny tilesVisible
 
 -- Prints out the map
 -- Starter function
-renderMap :: Int -> Int -> [(Int,Int)] -> [Tile] -> IO ()
-renderMap x y tilesVisible map = (negate (renderWidth*2)) `deepseq` (negate (renderHeight*2)) `deepseq` renderMap' x y (negate (renderWidth*2)) (negate (renderHeight*2)) tilesVisible map
+renderMap :: Int -> Int -> [(Int,Int)] -> [Tile] -> Picture
+renderMap x y tilesVisible map = (negate renderWidth) `deepseq` (negate renderHeight) `deepseq` pictures (renderMap' x y (negate renderWidth) (negate renderHeight) tilesVisible map)
 
-renderMap' :: Int -> Int -> Int -> Int -> [(Int,Int)] -> [Tile] -> IO ()
+renderMap' :: Int -> Int -> Int -> Int -> [(Int,Int)] -> [Tile] -> [Picture]
 renderMap' x y nx ny tilesVisible map
-    | nx == 0 && ny == 0 = do
-        putStr "|P"
-        (nx+1) `seq` renderMap' x y (nx+1) ny tilesVisible map
-    | otherwise = do
-        if nx < (renderWidth*2) 
-            then do
-                if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
-                    then do
-                        let currTile = (x+nx) `seq` (y+ny) `seq` getTile (x+nx) (y+ny) map
-                            currTileType = currTile `seq` tileType currTile
-                        case currTileType of 
-                            'd' ->  putStr "| "
-                            'l' ->  putStr "|!"
-                            'p' ->  putStr "|O"
-                            'w' ->  putStr "|~"
-                            _   ->  putStr "|X"
-                    else putStr "|?"
-                renderMap' x y (nx+1) ny tilesVisible map
-            else do
-                if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
-                    then do
-                        let currTile = (x+nx) `seq` (y+ny) `seq` getTile (x+nx) (y+ny) map
-                            currTileType = currTile `seq` tileType currTile
-                        case currTileType of 
-                            'd' ->  putStrLn "| |"
-                            'l' ->  putStrLn "|!|"
-                            'p' ->  putStrLn "|O|"
-                            'w' ->  putStrLn "|~|"
-                            _   ->  putStrLn "|X|"
-                    else putStrLn "|?|"
-                if ny < (renderHeight*2)
-                    then do
-                        (negate (renderWidth*2)) `deepseq` (ny+1) `seq` renderMap' x y (negate (renderWidth*2)) (ny+1) tilesVisible map
-                    else
-                        return ()
+    | ny > renderHeight = []
+    | nx <= renderWidth = do
+            if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
+                then do
+                    let currTile = (x+nx) `seq` (y+ny) `seq` getTile (x+nx) (y+ny) map
+                        currTileType = currTile `seq` tileType currTile
+                    case currTileType of 
+                        'd' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color yellow $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderMap' x y (nx+1) ny tilesVisible map
+                        'l' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color red $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderMap' x y (nx+1) ny tilesVisible map
+                        'p' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color azure $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderMap' x y (nx+1) ny tilesVisible map
+                        'w' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color blue $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderMap' x y (nx+1) ny tilesVisible map
+                        _   ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color black $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderMap' x y (nx+1) ny tilesVisible map
+                else [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color (greyN 0.33) $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderMap' x y (nx+1) ny tilesVisible map
+    | otherwise = (negate renderWidth) `deepseq` (ny+1) `seq` renderMap' x y (negate renderWidth) (ny+1) tilesVisible map
+            
 
 -- Searches for a specific tile type using Depth-First-Search and returns the length of the shortest path found
 -- Starter function
@@ -307,9 +340,8 @@ getClosestTile'' sx sy targetTile steps tilesLooted pathTaken map
 
 
 
--- Main loop functions
-loop:: State -> [(Int,Int)] -> [(Int,Int)] -> [Tile] -> Int -> IO ()
-loop state tilesLooted tilesVisible map score = do
+handleInput :: Event -> State -> State
+handleInput (EventKey k ks _ _) state = do
     threadDelay 2000
     let currX = xPos state
         currY = yPos state

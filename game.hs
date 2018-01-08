@@ -74,7 +74,8 @@ data State = State { xPos :: Int
                     , stepsTaken :: Int
                     , availableThreads :: [Int]
                     , threadCount :: Int
-                    , gameStatus :: Int }
+                    , gameStatus :: Int
+                    , lastKeyStroke :: Key }
 
 -- Moves player one tile in the specified direction and reduces water by one unit
 movePlayerUp :: TVar State -> IO ()
@@ -579,37 +580,43 @@ resetWormThreads allWormPaths
     | otherwise = []
     
 
-handleInput :: Event -> TVar State -> IO (TVar State)
-handleInput (EventKey key keyState _ _) gameState = do
+getInput :: Event -> TVar State -> IO (TVar State)
+getInput (EventKey key keyState _ _) gameState = do
     state <- readTVarIO gameState
     if (keyState == Down)
         then if ((gameMode state) == 0)
             then do
                 case key of
                     (Char 'k') -> do 
-                                atomically $ writeTVar gameState (state {gameMode = -5})
+                                atomically $ do
+                                                newState <- readTVar gameState 
+                                                writeTVar gameState (newState {lastKeyStroke = (Char 'k')})
                                 return gameState
                     (Char 'w') -> do
-                                movePlayerUp gameState
-                                newState <- readTVarIO gameState
-                                checkLock gameState 0
+                                atomically $do
+                                                newState <- readTVar gameState 
+                                                writeTVar gameState (newState {lastKeyStroke = (Char 'w')})
                                 return gameState
                     (Char 's') -> do
-                                movePlayerDown gameState
-                                newState <- readTVarIO gameState
-                                checkLock gameState 0
+                                atomically $ do
+                                                newState <- readTVar gameState 
+                                                writeTVar gameState (newState {lastKeyStroke = (Char 's')})
                                 return gameState
                     (Char 'a') -> do
-                                movePlayerLeft gameState
-                                newState <- readTVarIO gameState
-                                checkLock gameState 0
+                                atomically $ do
+                                                newState <- readTVar gameState 
+                                                writeTVar gameState (newState {lastKeyStroke = (Char 'a')})
                                 return gameState
                     (Char 'd') -> do
-                                movePlayerRight gameState
-                                newState <- readTVarIO gameState
-                                checkLock gameState 0
+                                atomically $ do
+                                                newState <- readTVar gameState 
+                                                writeTVar gameState (newState {lastKeyStroke = (Char 'd')})
                                 return gameState
-                    _          -> return gameState
+                    _          -> do
+                                atomically $ do
+                                                newState <- readTVar gameState 
+                                                writeTVar gameState (newState {lastKeyStroke = (Char '_')})
+                                return gameState
             else if ((gameMode state) < 0) && ((gameMode state) >= -5)
                 then do
                     atomically $ writeTVar gameState (state {xPos = 0
@@ -626,7 +633,55 @@ handleInput (EventKey key keyState _ _) gameState = do
                     return gameState
                 else return gameState
         else return gameState
-handleInput _ gameState = return gameState
+getInput _ gameState = return gameState
+
+processInput :: Float -> TVar State -> IO (TVar State)
+processInput _ gameState = do
+    state <- readTVarIO gameState
+    let key = (lastKeyStroke state)
+    if ((gameMode state) == 0)
+        then
+            case key of
+                (Char 'k') -> do 
+                            atomically $do
+                                            newState <- readTVar gameState 
+                                            writeTVar gameState (newState {gameMode = -5, lastKeyStroke = (Char '_')})
+                            return gameState
+                (Char 'w') -> do
+                            movePlayerUp gameState
+                            newState <- readTVarIO gameState
+                            checkLock gameState 0
+                            atomically $ do
+                                            newState <- readTVar gameState 
+                                            writeTVar gameState (newState {lastKeyStroke = (Char '_')})
+                            return gameState
+                (Char 's') -> do
+                            movePlayerDown gameState
+                            newState <- readTVarIO gameState
+                            checkLock gameState 0
+                            atomically $ do
+                                            newState <- readTVar gameState 
+                                            writeTVar gameState (newState {lastKeyStroke = (Char '_')})
+                            return gameState
+                (Char 'a') -> do
+                            movePlayerLeft gameState
+                            newState <- readTVarIO gameState
+                            checkLock gameState 0
+                            atomically $ do
+                                            newState <- readTVar gameState 
+                                            writeTVar gameState (newState {lastKeyStroke = (Char '_')})
+                            return gameState
+                (Char 'd') -> do
+                            movePlayerRight gameState
+                            newState <- readTVarIO gameState
+                            checkLock gameState 0
+                            atomically $ do
+                                            newState <- readTVar gameState 
+                                            writeTVar gameState (newState {lastKeyStroke = (Char '_')})
+                            return gameState
+                _          -> return gameState
+        else return gameState
+
 
 main = do
     if lineOfSight < 0 || maxWaterLevel < 0 || waterRefill < 0 || treasureProb < 0 || waterProb < 0 || portalProb < 0 || lavaProb < 0 || adjLavaProb < 0 || maxPathLength < 0 || renderWidth <= 0 || renderHeight <= 0 || maxWormLength <= 0 || wormProb < 0
@@ -652,12 +707,13 @@ main = do
                                                     , stepsTaken = 0
                                                     , availableThreads = []
                                                     , threadCount = 0
-                                                    , gameStatus = 0 })
+                                                    , gameStatus = 0 
+                                                    , lastKeyStroke = (Char '_')})
     initialState `seq` createForkedThreads initialState 1
     playIO (InWindow "Treasure Hunter" (1024, 600) (10, 10))
                             black
-                            1
+                            20
                             initialState
                             renderWindow
-                            handleInput
-                            (\_ state -> return state)
+                            getInput
+                            processInput

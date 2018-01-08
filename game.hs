@@ -4,8 +4,9 @@ import System.Random
 import Data.List
 import Control.DeepSeq
 import Graphics.Gloss
-import Graphics.Gloss.Interface.Pure.Game
+import Graphics.Gloss.Interface.IO.Game
 import Control.Monad
+import Control.Parallel
 import Control.Concurrent
 import Control.Concurrent.STM
 
@@ -17,8 +18,6 @@ maxWaterLevel = 20
 
 -- Water units refilled when walking over a water tile
 waterRefill = 15
-        
-maxWorms = 3
 
 maxWormLength = 5
 
@@ -70,46 +69,64 @@ data State = State { xPos :: Int
                     , tilesVisible :: [(Int,Int)]
                     , gameMap :: [Tile]
                     , score :: Int
-                    , emerging :: [(Int,Int)]
-                    , digging :: [(Int,Int)]
+                    , wormPaths :: [[(Int,Int)]]
                     , gameMode :: Int
-                    , stepsTaken :: Int}
-    deriving Show
+                    , stepsTaken :: Int
+                    , availableThreads :: [Int]
+                    , threadCount :: Int
+                    , gameStatus :: Int }
 
 -- Moves player one tile in the specified direction and reduces water by one unit
-movePlayerUp :: State -> State
-movePlayerUp state = 
+movePlayerUp :: TVar State -> IO ()
+movePlayerUp gameState = do
+    state <- readTVarIO gameState
     if (yPos state) > 0
-        then movePlayer (state { yPos = (yPos state) - 1, waterLevel = (waterLevel state) - 1 })
-        else state
+        then do
+            newState <- movePlayer (state { yPos = (yPos state) - 1, waterLevel = (waterLevel state) - 1 })
+            atomically $ writeTVar gameState (newState {stepsTaken = (stepsTaken newState)+1})
+            generateWorm gameState
+            return ()
+        else return ()
 
-movePlayerDown :: State -> State
-movePlayerDown state =
-    movePlayer (state { yPos = (yPos state) + 1, waterLevel = (waterLevel state) - 1 })
+movePlayerDown :: TVar State -> IO ()
+movePlayerDown gameState = do
+    state <- readTVarIO gameState
+    newState <- movePlayer (state { yPos = (yPos state) + 1, waterLevel = (waterLevel state) - 1 })
+    atomically $ writeTVar gameState (newState {stepsTaken = (stepsTaken newState)+1})
+    generateWorm gameState
+    return ()
 
-movePlayerLeft :: State -> State
-movePlayerLeft state =
+movePlayerLeft :: TVar State -> IO ()
+movePlayerLeft gameState = do
+    state <- readTVarIO gameState
     if (xPos state) > 0
-        then movePlayer (state { xPos = (xPos state) - 1, waterLevel = (waterLevel state) - 1 })
-        else state
+        then do
+            newState <- movePlayer (state { xPos = (xPos state) - 1, waterLevel = (waterLevel state) - 1 })
+            atomically $ writeTVar gameState (newState {stepsTaken = (stepsTaken newState)+1})
+            generateWorm gameState
+            return ()
+        else return ()
 
-movePlayerRight :: State -> State
-movePlayerRight state = 
-    movePlayer (state { xPos = (xPos state) + 1, waterLevel = (waterLevel state) - 1 })
+movePlayerRight :: TVar State -> IO ()
+movePlayerRight gameState = do
+    state <- readTVarIO gameState
+    newState <- movePlayer (state { xPos = (xPos state) + 1, waterLevel = (waterLevel state) - 1 })
+    atomically $ writeTVar gameState (newState {stepsTaken = (stepsTaken newState)+1})
+    generateWorm gameState
+    return ()
 
 -- Refills player's water by a constant amount of units
-refillWater :: State -> State
+refillWater :: State -> IO State
 refillWater state = 
-    state { waterLevel = minimum([maxWaterLevel,(waterLevel state)+(waterRefill)]) }
+    return (state { waterLevel = minimum([maxWaterLevel,(waterLevel state)+(waterRefill)]) })
 
 -- Handles flow of the game as the player moves
-movePlayer :: State -> State
+movePlayer :: State -> IO State
 movePlayer state =
     if (waterLevel state) < 0
         then do
-            state {gameMode = -1}
+            return (state {gameMode = -1})
         else do
-            forkIO $ generateWorm state
             let newTilesVisible = (tilesVisible state) ++ (detectTiles currX currY (tilesVisible state))
                 tilesVisible' = newTilesVisible `deepseq` rmdups newTilesVisible
                 currX = xPos state
@@ -118,16 +135,18 @@ movePlayer state =
                 currTileType = currTile `seq` tileType currTile
             case currTileType of 
                 'd' ->  do
-                    if (elem (currX,currY) (tilesLooted state)) || not (hasTreasure currTile)
-                        then state { tilesVisible = tilesVisible' }
-                        else state { tilesLooted = ((tilesLooted state) ++ [(currX,currY)]), tilesVisible = tilesVisible', score = (score state) + 1 }
+                    if elem (currX,currY) (filter (\x -> if (fst x) >= 0 && (snd x) >= 0 then True else False) (concat (wormPaths state)))
+                        then return (state {gameMode = -4})
+                        else if (elem (currX,currY) (tilesLooted state)) || not (hasTreasure currTile)
+                            then return (state { tilesVisible = tilesVisible' })
+                            else return (state { tilesLooted = ((tilesLooted state) ++ [(currX,currY)]), tilesVisible = tilesVisible', score = (score state) + 1 })
                 'l' ->  do
-                    state {gameMode = -2}
+                    return (state {gameMode = -2})
                 'p' ->  do
-                    state {gameMode = -3}
+                    return (state {gameMode = -3})
                 'w' ->  do
                     if elem (currX,currY) (tilesLooted state)
-                        then state {tilesVisible = tilesVisible'}
+                        then return (state {tilesVisible = tilesVisible'})
                         else refillWater (state { tilesLooted = ((tilesLooted state) ++ [(currX,currY)]), tilesVisible = tilesVisible' })
 
 
@@ -276,7 +295,6 @@ getClosestTile sx sy targetTile tilesLooted gameMap = do
                         else (show treasureDist)
                 else "None"
 
-
 -- ... using lazy evaluation
 getClosestTile' :: Int -> Int -> Char -> Int -> [(Int,Int)] -> [(Int,Int)] -> [Tile] -> Int
 getClosestTile' sx sy targetTile steps tilesLooted pathTaken gameMap
@@ -313,31 +331,140 @@ getClosestTile'' sx sy targetTile steps tilesLooted pathTaken gameMap
                         allPaths''' `deepseq` minimum (allPaths''')
                     else (maxPathLength*2)
 
-generateWorm :: State -> IO ThreadId -> IO ()
-generateWorm state = do
+generateWorm :: TVar State -> IO ()
+generateWorm gameState = do
+    state <- readTVarIO gameState
     let randNum = (randomRs (1,100) (randGen) :: [Int]) !! (stepsTaken state)
-    if randNum `seq` (randNum <= wormProb)
-        then print "derp"
-        else return ()
+    if randNum `seq` (randNum <= wormProb) 
+        then do
+            if (length (availableThreads state)) > 0
+                then do 
+                    let newCoordPool = filter (\x -> getValidWormTiles (-2,-2) x (xPos state, yPos state) (wormPaths state) [] (tilesLooted state) (gameMap state)) (detectTiles (xPos state) (yPos state) (tilesVisible state))
+                    if ((length newCoordPool) > 0)
+                        then do
+                            let chosenCoords = (newCoordPool!!(randNum `mod` (length newCoordPool)))
+                                chosenThread = head (availableThreads state)
+                            atomically $ writeTVar gameState (state {
+                                                            wormPaths = (take (chosenThread) (wormPaths state)) ++ [[(-1,-1), chosenCoords]] ++ (drop (chosenThread+1) (wormPaths state))
+                                                            , availableThreads = tail (availableThreads state)
+                                                            , gameStatus = ((threadCount state)-(length (availableThreads state))+1) })
+                            return ()
+                        else atomically $ writeTVar gameState (state {gameStatus = (threadCount state)})
+                else do
+                    (createForkedThreads gameState 1) >> (generateWorm gameState)
+        else atomically $ writeTVar gameState (state {gameStatus = ((threadCount state)-(length (availableThreads state)))}) 
+
+controlWorm :: TVar State -> Int -> IO ()
+controlWorm gameState threadIndex = do
+    state <- readTVarIO gameState
+    if (gameStatus state) > 0 
+        && ((head ((wormPaths state)!!threadIndex)) /= (-1,-1) || ((head ((wormPaths state)!!threadIndex)) == (-1,-1) && (length ((wormPaths state)!!threadIndex)) > 1))
+        then do
+            if (head ((wormPaths state)!!threadIndex)) /= (-1,-1)
+                then moveWorm gameState threadIndex
+                else atomically $ do 
+                        newState <- readTVar gameState
+                        writeTVar gameState (newState {
+                            wormPaths = (take (threadIndex) (wormPaths newState)) ++ [tail ((wormPaths newState)!!threadIndex)] ++ (drop (threadIndex+1) (wormPaths newState))
+                            , gameStatus = (gameStatus newState)-1 })
+            checkLock gameState 0
+            controlWorm gameState threadIndex
+        else do
+            threadDelay 90000
+            controlWorm gameState threadIndex
+
+moveWorm :: TVar State -> Int -> IO ()
+moveWorm gameState threadIndex = do
+    state <- readTVarIO gameState
+    let currWormPath = ((wormPaths state)!!threadIndex)
+    if (last currWormPath) /= (-1,-1)
+        then do
+            let newCoordPool = filter (\x -> 
+                                    getValidWormTiles (head currWormPath) x (xPos state, yPos state) (wormPaths state) currWormPath (tilesLooted state) (gameMap state))
+                                    [((fst (head currWormPath))+1,(snd (head currWormPath)))
+                                    ,((fst (head currWormPath))-1,(snd (head currWormPath)))
+                                    ,((fst (head currWormPath)),(snd (head currWormPath))+1)
+                                    ,((fst (head currWormPath)),(snd (head currWormPath))-1)]
+                randNum = (randomRs (1,100) (randGen) :: [Int]) !! (stepsTaken state)
+            if (length newCoordPool) > 0 && (length currWormPath) < maxWormLength
+                then do
+                    let newCoord = head (sortBy (\a b -> compare (getDistance a (xPos state, yPos state)) (getDistance b (xPos state, yPos state))) newCoordPool)
+                    atomically $ do 
+                        newState <- readTVar gameState
+                        writeTVar gameState (newState {
+                            wormPaths = (take (threadIndex) (wormPaths newState)) ++ [[newCoord] ++ ((wormPaths newState)!!threadIndex)] ++ (drop (threadIndex+1) (wormPaths newState))
+                            , gameStatus = (gameStatus newState)-1 })
+                else if (length currWormPath) > 1
+                    then atomically $ do 
+                            newState <- readTVar gameState
+                            writeTVar gameState (newState {
+                                wormPaths = (take (threadIndex) (wormPaths newState)) ++ [(tail (reverse ((wormPaths newState)!!threadIndex))) ++ [(-1,-1)]] ++ (drop (threadIndex+1) (wormPaths newState))
+                                , gameStatus = (gameStatus newState)-1 })
+                    else atomically $ do 
+                            newState <- readTVar gameState
+                            writeTVar gameState (newState {
+                                wormPaths = (take (threadIndex) (wormPaths newState)) ++ [[(-1,-1)]] ++ (drop (threadIndex+1) (wormPaths newState))
+                                , availableThreads = (availableThreads newState) ++ [threadIndex]
+                                , gameStatus = (gameStatus newState)-1 })
+        else if (head (tail ((wormPaths state)!!threadIndex))) /= (-1,-1)
+            then atomically $ do 
+                    newState <- readTVar gameState
+                    writeTVar gameState (newState {
+                        wormPaths = (take (threadIndex) (wormPaths newState)) ++ [tail ((wormPaths newState)!!threadIndex)] ++ (drop (threadIndex+1) (wormPaths newState))
+                        , gameStatus = (gameStatus newState)-1 })
+            else atomically $ do 
+                    newState <- readTVar gameState
+                    writeTVar gameState (newState {
+                        wormPaths = (take (threadIndex) (wormPaths newState)) ++ [[(-1,-1)]] ++ (drop (threadIndex+1) (wormPaths newState))
+                        , availableThreads = (availableThreads newState) ++ [threadIndex]
+                        , gameStatus = (gameStatus newState)-1 })
 
 
+getDistance :: (Int,Int) -> (Int,Int) -> Float
+getDistance startCoords endCoords = abs(sqrt(fromIntegral ((((fst endCoords) - (fst startCoords))^2)+(((snd endCoords) - (snd startCoords))^2))))
+
+getValidWormTiles :: (Int,Int) -> (Int,Int) -> (Int,Int) -> [[(Int,Int)]] -> [(Int,Int)] -> [(Int,Int)] -> [Tile] -> Bool
+getValidWormTiles headCoords coords playerCoords allWormPaths currWormPath tilesLooted gameMap = do
+    if (not (elem coords ((getProjectedWormBodyTiles headCoords allWormPaths) ++ (concat allWormPaths))))
+        && (not ((fst coords) < 0 || (snd coords) < 0))
+        && (not ((fst playerCoords) == (fst coords) && (snd playerCoords) == (snd coords)))
+        then do
+            let currTile = getTile (fst coords) (snd coords) gameMap
+                currTileType = currTile `seq` tileType currTile
+            if (currTileType == 'd' && (not (hasTreasure currTile) || elem coords tilesLooted))
+                then True
+                else False
+        else False
+
+getProjectedWormBodyTiles :: (Int,Int) -> [[(Int,Int)]] -> [(Int,Int)]
+getProjectedWormBodyTiles coords allWormPaths
+    | (length allWormPaths) > 0 = do
+        let currWormPath = head allWormPaths
+        if ((head currWormPath) /= coords && (head currWormPath) /= (-1,-1))
+            then [((fst (head currWormPath))+1,(snd (head currWormPath)))
+                 ,((fst (head currWormPath))-1,(snd (head currWormPath)))
+                 ,((fst (head currWormPath)),(snd (head currWormPath))+1)
+                 ,((fst (head currWormPath)),(snd (head currWormPath))-1)] ++ (getProjectedWormBodyTiles coords (tail allWormPaths))
+            else (getProjectedWormBodyTiles coords (tail allWormPaths))
+    | otherwise = []
 
 -- Prints out the map and HUD
 -- Starter function
-renderWindow :: TVar State -> Picture
+renderWindow :: TVar State -> IO Picture
 renderWindow gameState = do
-    state <- readTVar gameState
-    (negate renderWidth) `deepseq` (negate renderHeight) `deepseq` pictures ((renderState state) ++ (renderGameMap (xPos state) (yPos state) (negate renderWidth) (negate renderHeight) (tilesVisible state) (gameMap state)) ++ (renderEntities state) ++ (renderGameOver state))
+    checkLock gameState 0
+    state <- readTVarIO gameState
+    return ((negate renderWidth) `deepseq` (negate renderHeight) `deepseq` pictures ((renderState state) ++ (renderGameMap (xPos state) (yPos state) (negate renderWidth) (negate renderHeight) (tilesVisible state) (gameMap state)) ++ (renderPlayer state) ++ (renderWorms (xPos state) (yPos state) (negate renderWidth) (negate renderHeight) (tilesVisible state) (wormPaths state)) ++ (renderGameOver state)))
 
 -- Prints out the "status" section of the display with information such as water left, treasures found
 -- and distance to nearby points of interest
 renderState :: State -> [Picture]
 renderState state = 
     [translate (-112.5+xOffset) (263.5+yOffset) $ color (greyN 0.75) $ rectangleSolid 695 54
-    , translate (-450+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("Nearest water : " ++ (getClosestTile (xPos state) (yPos state) 'w' (tilesLooted state) (gameMap state)))
+    , translate (-450+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("Nearest water : " ++ getClosestTile (xPos state) (yPos state) 'w' (tilesLooted state) (gameMap state))
     , translate (-225+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("Nearest portal : " ++ getClosestTile (xPos state) (yPos state) 'p' (tilesLooted state) (gameMap state))
     , translate (0+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("Nearest treasure : " ++ getClosestTile (xPos state) (yPos state) 'd' (tilesLooted state) (gameMap state))
-    , translate (-400+xOffset) (270+yOffset) $ scale 0.15 0.15 $ Text ("Water units left : " ++ (show (waterLevel state)))
+    , translate (-400+xOffset) (270+yOffset) $ scale 0.15 0.15 $ Text ("Water units left : " ++ (if ((waterLevel state) == 0 || (waterLevel state) == (-1)) then "Dry" else show (waterLevel state)))
     , translate (-70+xOffset) (270+yOffset) $ scale 0.15 0.15 $ Text ("Treasures found  : " ++ (show (score state)))
     , translate (-345+xOffset) (250+yOffset) $ rectangleWire 230 27
     , translate (-120+xOffset) (250+yOffset) $ rectangleWire 220 27
@@ -350,76 +477,159 @@ renderGameMap :: Int -> Int -> Int -> Int -> [(Int,Int)] -> [Tile] -> [Picture]
 renderGameMap x y nx ny tilesVisible gameMap
     | ny > renderHeight = []
     | nx <= renderWidth = do
-            if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
-                then do
-                    let currTile = (x+nx) `seq` (y+ny) `seq` getTile (x+nx) (y+ny) gameMap
-                        currTileType = currTile `seq` tileType currTile
-                    case currTileType of 
-                        'd' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color yellow $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
-                        'l' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color red $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
-                        'p' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color azure $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
-                        'w' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color blue $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
-                        _   ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color black $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
-                else [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color black $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
+        if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
+            then do
+                let currTile = (x+nx) `seq` (y+ny) `seq` getTile (x+nx) (y+ny) gameMap
+                    currTileType = currTile `seq` tileType currTile
+                case currTileType of 
+                    'd' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color yellow $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
+                    'l' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color red $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
+                    'p' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color azure $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
+                    'w' ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color blue $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
+                    _   ->  [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color black $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
+            else [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color black $ rectangleSolid tileSize tileSize, translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ rectangleWire tileSize tileSize] ++ renderGameMap x y (nx+1) ny tilesVisible gameMap
     | otherwise = (negate renderWidth) `deepseq` (ny+1) `seq` renderGameMap x y (negate renderWidth) (ny+1) tilesVisible gameMap
 
-renderEntities :: State -> [Picture]
-renderEntities state = [color green $ circleSolid 9
+renderPlayer :: State -> [Picture]
+renderPlayer state = [color green $ circleSolid 9
                         , circle 9
                         , translate (-4) (-5) $ scale 0.1 0.1 $ Text "P"
                         ]
+
+renderWorms :: Int -> Int -> Int -> Int -> [(Int,Int)] -> [[(Int,Int)]] -> [Picture]
+renderWorms x y nx ny tilesVisible allWormPaths
+    | ny > renderHeight = []
+    | nx <= renderWidth = do
+        if (x+nx) `seq` (y+ny) `seq` elem ((x+nx),(y+ny)) tilesVisible
+            then do
+                if elem ((x+nx),(y+ny)) (filter (\x -> if (fst x) >= 0 && (snd x) >= 0 then True else False) (concat allWormPaths))
+                    then if (isWormHead ((x+nx),(y+ny)) allWormPaths)
+                        then [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color red $ circleSolid 12
+                            , translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ circle 12
+                            , translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ circleSolid 7
+                            ] ++ renderWorms x y (nx+1) ny tilesVisible allWormPaths
+                        else [translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ color red $ circleSolid 11
+                            , translate (fromIntegral nx*tileSize) (-(fromIntegral ny*tileSize)) $ circle 11
+                            ] ++ renderWorms x y (nx+1) ny tilesVisible allWormPaths
+                    else (nx+1) `seq` renderWorms x y (nx+1) ny tilesVisible allWormPaths
+            else (nx+1) `seq` renderWorms x y (nx+1) ny tilesVisible allWormPaths
+    | otherwise = (negate renderWidth) `deepseq` (ny+1) `seq` renderWorms x y (negate renderWidth) (ny+1) tilesVisible allWormPaths
+
+isWormHead :: (Int,Int) -> [[(Int,Int)]] -> Bool
+isWormHead coords allWormPaths
+    | (length allWormPaths) > 0 = if ((head (head allWormPaths)) == coords && (last (head allWormPaths)) /= (-1,-1)) 
+                                  || ((head (head allWormPaths)) == (-1,-1) && (last (head allWormPaths)) == coords)
+                                  then True else isWormHead coords (tail allWormPaths)
+    | otherwise = False
 
 renderGameOver :: State -> [Picture]
 renderGameOver state
     | (gameMode state == -1) = [color (greyN 0.44) $ rectangleSolid 900 500
                                 , rectangleWire 900 500
                                 , translate (-300) (50) $ color red $ scale 0.7 0.7 $ Text "GAME OVER !"
-                                , translate (-300) (-50) $ color red $ scale 0.4 0.7 $ Text "CUZ I SAID SO"
+                                , translate (-340) (-50) $ color red $ scale 0.4 0.7 $ Text "YOU RAN OUT OF WATER !"
                                 ]
     | (gameMode state == -2) = [color (greyN 0.44) $ rectangleSolid 900 500
                                 , rectangleWire 900 500
                                 , translate (-300) (50) $ color red $ scale 0.7 0.7 $ Text "GAME OVER !"
-                                , translate (-300) (-50) $ color red $ scale 0.4 0.7 $ Text "CUZ I SAID SO"
+                                , translate (-260) (-50) $ color red $ scale 0.4 0.7 $ Text "YOU FELL IN LAVA !"
                                 ]
     | (gameMode state == -3) = [color (greyN 0.44) $ rectangleSolid 900 500
                                 , rectangleWire 900 500
-                                , translate (-300) (50) $ color red $ scale 0.7 0.7 $ Text "GAME OVER !"
-                                , translate (-300) (-50) $ color red $ scale 0.4 0.7 $ Text "CUZ I SAID SO"
+                                , translate (-300) (50) $ color green $ scale 0.7 0.7 $ Text "SUCCESS !"
+                                , translate (-380) (-50) $ color green $ scale 0.4 0.7 $ Text "YOU MANAGED TO ESCAPE !"
                                 ]
     | (gameMode state == -4) = [color (greyN 0.44) $ rectangleSolid 900 500
                                 , rectangleWire 900 500
                                 , translate (-300) (50) $ color red $ scale 0.7 0.7 $ Text "GAME OVER !"
-                                , translate (-300) (-50) $ color red $ scale 0.4 0.7 $ Text "CUZ I SAID SO"
+                                , translate (-300) (-50) $ color red $ scale 0.4 0.7 $ Text "YOU GOT SQUASHED"
+                                , translate (-260) (-150) $ color red $ scale 0.4 0.7 $ Text "BY A WORM !"
+                                ]
+    | (gameMode state == -5) = [color (greyN 0.44) $ rectangleSolid 900 500
+                                , rectangleWire 900 500
+                                , translate (-300) (50) $ color red $ scale 0.7 0.7 $ Text "GAME OVER !"
+                                , translate (-300) (-50) $ color red $ scale 0.4 0.7 $ Text "YOU KILLED YOURSELF !"
                                 ]
     | otherwise = []
 
-handleInput :: Event -> TVar State -> TVar State
+checkLock :: TVar State -> Int -> IO ()
+checkLock gameState cond = do
+    state <- readTVarIO gameState
+    if ((gameStatus state) == cond)
+        then return ()
+        else do
+            threadDelay 3000
+            checkLock gameState cond
+
+createForkedThreads :: TVar State -> Int -> IO ()
+createForkedThreads gameState numThreads
+    | wormProb > 0 && (numThreads > 0) = do
+        state <- readTVarIO gameState
+        forkIO $ controlWorm gameState (threadCount state)
+        atomically $ writeTVar gameState (state {wormPaths = ((wormPaths state) ++ [[(-1,-1)]])
+                                                , availableThreads = (availableThreads state) ++ [(threadCount state)]
+                                                , threadCount = (threadCount state)+1})
+        print (threadCount state)
+        createForkedThreads gameState (numThreads-1)
+    | otherwise = return ()
+
+resetWormThreads :: [[(Int,Int)]] -> [[(Int,Int)]]
+resetWormThreads allWormPaths
+    | (length allWormPaths) > 0 = [[(-1,-1)]] ++ resetWormThreads (tail allWormPaths)
+    | otherwise = []
+    
+
+handleInput :: Event -> TVar State -> IO (TVar State)
 handleInput (EventKey key keyState _ _) gameState = do
-    state <- readTVar gameState
-    if (keyState == Down) && ((gameMode state) == 0)
-        then do
-            case key of
-                (Char 'k') -> do 
-                            writeTVar gameState (state {gameMode = -1})
-                            gameState
-                (Char 'w') -> do 
-                            writeTVar gameState (movePlayerUp state)
-                            gameState
-                (Char 's') -> do 
-                            writeTVar gameState (movePlayerDown state)
-                            gameState
-                (Char 'a') -> do 
-                            writeTVar gameState (movePlayerLeft state)
-                            gameState
-                (Char 'd') -> do 
-                            writeTVar gameState (movePlayerRight state)
-                            gameState
-                _          -> gameState
-        else gameState
-handleInput _ gameState = gameState
+    state <- readTVarIO gameState
+    if (keyState == Down)
+        then if ((gameMode state) == 0)
+            then do
+                case key of
+                    (Char 'k') -> do 
+                                atomically $ writeTVar gameState (state {gameMode = -5})
+                                return gameState
+                    (Char 'w') -> do
+                                movePlayerUp gameState
+                                newState <- readTVarIO gameState
+                                checkLock gameState 0
+                                return gameState
+                    (Char 's') -> do
+                                movePlayerDown gameState
+                                newState <- readTVarIO gameState
+                                checkLock gameState 0
+                                return gameState
+                    (Char 'a') -> do
+                                movePlayerLeft gameState
+                                newState <- readTVarIO gameState
+                                checkLock gameState 0
+                                return gameState
+                    (Char 'd') -> do
+                                movePlayerRight gameState
+                                newState <- readTVarIO gameState
+                                checkLock gameState 0
+                                return gameState
+                    _          -> return gameState
+            else if ((gameMode state) < 0) && ((gameMode state) >= -5)
+                then do
+                    atomically $ writeTVar gameState (state {xPos = 0
+                                                            , yPos = 0
+                                                            , waterLevel = maxWaterLevel
+                                                            , tilesLooted = []
+                                                            , tilesVisible = rmdups (detectTiles 0 0 [])
+                                                            , score = 0
+                                                            , wormPaths = resetWormThreads (wormPaths state)
+                                                            , gameMode = 0
+                                                            , stepsTaken = 0
+                                                            , availableThreads = [0..((threadCount state)-1)]
+                                                            , gameStatus = 0 })
+                    return gameState
+                else return gameState
+        else return gameState
+handleInput _ gameState = return gameState
 
 main = do
-    if lineOfSight < 0 || maxWaterLevel < 0 || waterRefill < 0 || treasureProb < 0 || waterProb < 0 || portalProb < 0 || lavaProb < 0 || adjLavaProb < 0 || maxPathLength < 0 || renderWidth <= 0 || renderHeight <= 0 
+    if lineOfSight < 0 || maxWaterLevel < 0 || waterRefill < 0 || treasureProb < 0 || waterProb < 0 || portalProb < 0 || lavaProb < 0 || adjLavaProb < 0 || maxPathLength < 0 || renderWidth <= 0 || renderHeight <= 0 || maxWormLength <= 0 || wormProb < 0
         then do
             print "ERROR : negative parameters detected ! please provide only positive values for each parameter ! (renderWidth and renderHeight must be greater than 0 as well)"
             exitWith ExitSuccess
@@ -429,14 +639,25 @@ main = do
             print "ERROR : spawning probabilities sum is greater than 100 !"
             exitWith ExitSuccess
         else return ()
-    let initialGameMap =  randGen `seq` generateMatrix 
-    let initialState = initialGameMap `seq` State {xPos = 0, yPos = 0, waterLevel = maxWaterLevel, tilesLooted = [], tilesVisible = [], gameMap = initialGameMap, score = 0, emerging = [], digging = [], gameMode = 0, stepsTaken = 0 }
-    currWormCount <- atomically $ newTVar 0
-    gameState <- atomically $ newTVar initialState
-    initialState `seq` play (InWindow "Treasure Hunter" (1024, 600) (10, 10))
+    let initialGameMap = (randGen `seq` generateMatrix)
+    initialState <- initialGameMap `seq` newTVarIO (State {xPos = 0
+                                                    , yPos = 0
+                                                    , waterLevel = maxWaterLevel
+                                                    , tilesLooted = []
+                                                    , tilesVisible = rmdups (detectTiles 0 0 [])
+                                                    , gameMap = initialGameMap
+                                                    , score = 0
+                                                    , wormPaths = []
+                                                    , gameMode = 0
+                                                    , stepsTaken = 0
+                                                    , availableThreads = []
+                                                    , threadCount = 0
+                                                    , gameStatus = 0 })
+    initialState `seq` createForkedThreads initialState 1
+    playIO (InWindow "Treasure Hunter" (1024, 600) (10, 10))
                             black
-                            10
-                            gameState
+                            1
+                            initialState
                             renderWindow
                             handleInput
-                            (\_ state -> state)
+                            (\_ state -> return state)

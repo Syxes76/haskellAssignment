@@ -455,7 +455,20 @@ renderWindow gameState = do
 -- and distance to nearby points of interest
 renderState :: State -> [Picture]
 renderState state = 
-    [translate (-112.5+xOffset) (263.5+yOffset) $ color (greyN 0.75) $ rectangleSolid 695 54
+    [translate (250+xOffset) (263.5+yOffset) $ color (greyN 0.75) $ rectangleSolid 695 54 
+    , translate (214+xOffset) (263.5+yOffset) $ rectangleWire 695 54
+    , translate (-112.5+xOffset) (263.5+yOffset) $ color (greyN 0.75) $ rectangleSolid 695 54
+    , translate (400+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("K : Suicide")
+    , translate (406+xOffset) (251+yOffset) $ rectangleWire 21 21
+    , translate (400+xOffset) (270+yOffset) $ scale 0.15 0.15 $ Text ("L : Save Game")
+    , translate (406+xOffset) (278+yOffset) $ rectangleWire 21 21
+    , translate (271+xOffset) (270+yOffset) $ scale 0.15 0.15 $ Text ("W")
+    , translate (278.5+xOffset) (278+yOffset) $ rectangleWire 21 21
+    , translate (245+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("A S D")
+    , translate (251+xOffset) (251+yOffset) $ rectangleWire 21 21
+    , translate (278.5+xOffset) (251+yOffset) $ rectangleWire 21 21
+    , translate (306+xOffset) (251+yOffset) $ rectangleWire 21 21
+    , translate (321+xOffset) (257+yOffset) $ scale 0.15 0.15 $ Text (": Move")
     , translate (-450+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("Nearest water : " ++ getClosestTile (head (playerPos state)) (last (playerPos state)) 'w' (tilesLooted state) (gameMap state) (param state))
     , translate (-225+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("Nearest portal : " ++ getClosestTile (head (playerPos state)) (last (playerPos state)) 'p' (tilesLooted state) (gameMap state) (param state))
     , translate (0+xOffset) (243+yOffset) $ scale 0.15 0.15 $ Text ("Nearest treasure : " ++ getClosestTile (head (playerPos state)) (last (playerPos state)) 'd' (tilesLooted state) (gameMap state) (param state))
@@ -591,7 +604,9 @@ getInput (EventKey key keyState _ _) gameState = do
                     (SpecialKey KeyEsc) -> exitWith ExitSuccess
                     (Char 'l') -> do 
                                 state <- readTVarIO gameState
-                                saveGame state
+                                print "Saving game..." 
+                                state `seq` saveGame state
+                                print "Game saved ! (game.sav)"
                                 return gameState
                     (Char 'k') -> do 
                                 atomically $ do
@@ -760,7 +775,7 @@ getLootedTiles tiles
 getWorms :: [[[Int]]] -> String
 getWorms allWormPaths
     | (length allWormPaths) > 0 && ((<) 1 . length $ head allWormPaths) && (last $ head allWormPaths) == [-1,-1] = "disappearing(" ++ (show $ init $ head allWormPaths) ++ ")\n" ++ (getWorms $ tail allWormPaths)
-    | (length allWormPaths) > 0 && ((<) 1 . length $ head allWormPaths) = "emerging(" ++ (show $ head allWormPaths) ++ ")\n" ++ (getWorms $ tail allWormPaths)
+    | (length allWormPaths) > 0 && (last $ head allWormPaths) /= [-1,-1] = "emerging(" ++ (show $ head allWormPaths) ++ ")\n" ++ (getWorms $ tail allWormPaths)
     | (length allWormPaths) > 0 = getWorms $ tail allWormPaths
     | otherwise = ""
 
